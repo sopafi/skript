@@ -6,6 +6,7 @@ USER_HOME="/home/$USER_NAME"
 
 CHECKER_IP="10.0.100.30"
 CHECKER_PORT="8000"
+DISABLE_OPENVPN="${DISABLE_OPENVPN:-0}"
 
 SSH_DIR="$USER_HOME/.ssh"
 AUTHORIZED_KEYS="$SSH_DIR/authorized_keys"
@@ -41,13 +42,17 @@ apt remove -y telnet ftp rsh-client talk tftp tftpd-hpa 2>/dev/null || true
 apt install -y telnet rsh-client talk ftp
 
 echo "[*] Preparing services for task 04..."
-apt remove -y vsftpd xrdp 2>/dev/null || true
-apt install -y vsftpd xrdp
 systemctl enable --now vsftpd
-systemctl enable --now xrdp
+systemctl enable xrdp
+systemctl is-active --quiet xrdp || systemctl start xrdp
 systemctl disable --now cups 2>/dev/null || true
 systemctl disable --now cups-browsed 2>/dev/null || true
-systemctl disable --now openvpn 2>/dev/null || true
+
+if [[ "$DISABLE_OPENVPN" == "1" ]]; then
+    systemctl disable --now openvpn 2>/dev/null || true
+else
+    echo "[*] Leaving openvpn untouched to preserve remote connectivity..."
+fi
 
 echo "[*] Preparing UFW for task 05..."
 ufw --force disable || true
