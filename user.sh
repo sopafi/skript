@@ -13,6 +13,11 @@ SUDOERS_USER="/etc/sudoers.d/user"
 SUDOERS_DEVOPS="/etc/sudoers.d/devops"
 CHECK_TASK="/usr/local/bin/check-task"
 
+if ! id "$USER_NAME" >/dev/null 2>&1; then
+    echo "[!] User '$USER_NAME' does not exist on this system."
+    exit 1
+fi
+
 echo "[*] Installing required packages..."
 apt update
 apt install -y curl openssh-server ufw xrdp vsftpd fail2ban
@@ -46,11 +51,12 @@ systemctl disable --now openvpn 2>/dev/null || true
 
 echo "[*] Preparing UFW for task 05..."
 ufw --force disable || true
-yes | ufw reset
+ufw --force reset
 ufw allow 80/tcp || true
 
 echo "[*] Preparing weak SSH config for task 06..."
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%s)
+SSHD_CONFIG_BACKUP="/etc/ssh/sshd_config.bak.$(date +%s)"
+cp /etc/ssh/sshd_config "$SSHD_CONFIG_BACKUP"
 
 sed -i 's/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config || true
 sed -i 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
@@ -60,7 +66,13 @@ grep -q '^PermitRootLogin ' /etc/ssh/sshd_config || echo 'PermitRootLogin yes' >
 grep -q '^PasswordAuthentication ' /etc/ssh/sshd_config || echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
 grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config || echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
 
-systemctl restart ssh || systemctl restart sshd || true
+if sshd -t; then
+    systemctl restart ssh || systemctl restart sshd || true
+else
+    echo "[!] Invalid sshd_config generated, restoring backup..."
+    cp "$SSHD_CONFIG_BACKUP" /etc/ssh/sshd_config
+    exit 1
+fi
 
 echo "[*] Preparing legacy user for task 07..."
 if ! id legacy >/dev/null 2>&1; then
