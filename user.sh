@@ -13,6 +13,8 @@ AUTHORIZED_KEYS="$SSH_DIR/authorized_keys"
 SUDOERS_USER="/etc/sudoers.d/user"
 SUDOERS_DEVOPS="/etc/sudoers.d/devops"
 CHECK_TASK="/usr/local/bin/check-task"
+APP_ENV_DIR="/etc/myapp"
+APP_ENV_FILE="$APP_ENV_DIR/app.env"
 
 if ! id "$USER_NAME" >/dev/null 2>&1; then
     echo "[!] User '$USER_NAME' does not exist on this system."
@@ -21,7 +23,7 @@ fi
 
 echo "[*] Installing required packages..."
 apt update
-apt install -y curl openssh-server ufw xrdp vsftpd fail2ban
+apt install -y apache2 curl openssh-server rpcbind ufw xrdp vsftpd fail2ban
 
 echo "[*] Creating ~/.ssh directory..."
 mkdir -p "$SSH_DIR"
@@ -38,10 +40,12 @@ echo "[*] Removing unattended-upgrades for task 02 initial state..."
 apt remove -y unattended-upgrades || true
 
 echo "[*] Preparing risky packages for task 03..."
-apt remove -y telnet ftp rsh-client talk tftp tftpd-hpa 2>/dev/null || true
-apt install -y telnet rsh-client talk ftp
+apt remove -y telnet ftp rsh-client tftp tftpd-hpa 2>/dev/null || true
+apt install -y telnet rsh-client ftp
 
 echo "[*] Preparing services for task 04..."
+systemctl enable --now apache2
+systemctl enable --now rpcbind
 systemctl enable --now vsftpd
 systemctl enable xrdp
 systemctl is-active --quiet xrdp || systemctl start xrdp
@@ -57,6 +61,7 @@ fi
 echo "[*] Preparing UFW for task 05..."
 ufw --force disable || true
 ufw --force reset
+ufw allow 21/tcp || true
 ufw allow 80/tcp || true
 
 echo "[*] Preparing weak SSH config for task 06..."
@@ -134,6 +139,15 @@ EOF
 chown root:root "$SUDOERS_USER"
 chmod 440 "$SUDOERS_USER"
 
+echo "[*] Preparing sensitive app config for task 10..."
+mkdir -p "$APP_ENV_DIR"
+cat > "$APP_ENV_FILE" <<'EOF'
+APP_MODE=demo
+APP_TOKEN=lab-demo-token
+EOF
+chown "$USER_NAME:$USER_NAME" "$APP_ENV_FILE"
+chmod 644 "$APP_ENV_FILE"
+
 echo "[*] Preparing journald for task 11..."
 if [[ -f /etc/systemd/journald.conf ]]; then
     sed -i 's/^[#[:space:]]*Storage=.*/Storage=auto/' /etc/systemd/journald.conf || true
@@ -151,18 +165,39 @@ cat > "$CHECK_TASK" <<EOF
 #!/bin/bash
 set -euo pipefail
 
-TASK_ID="\${1:-}"
+TASK_ID_RAW="\${1:-}"
 
-if [[ -z "\$TASK_ID" ]]; then
-    echo "Usage: check-task <task-id>"
+if [[ -z "\$TASK_ID_RAW" ]]; then
+    echo "Usage: check-task 01"
     exit 1
 fi
 
-RESPONSE="\$(curl -sS -X POST http://$CHECKER_IP:$CHECKER_PORT/api/check \\
-  -H "Content-Type: application/json" \\
-  -d "{\\"task_id\\":\\"\$TASK_ID\\"}")"
+TASK_ID="\$(printf '%s' "\$TASK_ID_RAW" | tr '[:lower:]' '[:upper:]')"
 
-STATUS="\$(echo "\$RESPONSE" | python3 -c 'import sys, json; print(json.load(sys.stdin)["status"])')"
+if [[ "\$TASK_ID" =~ ^T[0-9]{1,2}$ ]]; then
+    TASK_ID="\${TASK_ID#T}"
+fi
+
+if [[ "\$TASK_ID" =~ ^[0-9]{1,2}$ ]]; then
+    TASK_ID="\$(printf '%02d' "\$((10#\$TASK_ID))")"
+fi
+
+if [[ ! "\$TASK_ID" =~ ^(0[1-9]|1[0-2])$ ]]; then
+    echo "[ERROR] Unsupported task id: \$TASK_ID_RAW"
+    exit 1
+fi
+
+if ! RESPONSE="\$(curl -fsS -X POST http://$CHECKER_IP:$CHECKER_PORT/api/check \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"task_id\\":\\"\$TASK_ID\\"}")"; then
+    echo "[ERROR] Unable to reach checker API at http://$CHECKER_IP:$CHECKER_PORT/api/check"
+    exit 2
+fi
+
+if ! STATUS="\$(echo "\$RESPONSE" | python3 -c 'import sys, json; print(json.load(sys.stdin)["status"])')"; then
+    echo "[ERROR] Checker returned an invalid response"
+    exit 2
+fi
 
 if [[ "\$STATUS" == "ok" ]]; then
     MESSAGE="\$(echo "\$RESPONSE" | python3 -c 'import sys, json; print(json.load(sys.stdin)["message"])')"
