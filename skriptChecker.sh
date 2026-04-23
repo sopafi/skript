@@ -12,6 +12,7 @@ VENV_DIR="$BASE_DIR/venv"
 
 CHECKER_USER="ubuntu"
 CHECKER_GROUP="ubuntu"
+CHECKER_PASSWORD='Luk@aT!apPlE17^DNA%joy3219'
 
 CHECKER_IP="10.0.100.30"
 CHECKER_PORT="8000"
@@ -29,6 +30,13 @@ if [[ "$(id -u)" -ne 0 ]]; then
   echo "Spust skript pres sudo."
   exit 1
 fi
+
+if ! id "$CHECKER_USER" >/dev/null 2>&1; then
+  echo "Uzivatel $CHECKER_USER neexistuje."
+  exit 1
+fi
+
+printf '%s:%s\n' "$CHECKER_USER" "$CHECKER_PASSWORD" | chpasswd
 
 apt update
 apt install -y python3 python3-pip python3-venv openssh-client curl
@@ -107,6 +115,9 @@ cat > "$CORE_DIR/flags.py" <<'EOF'
 from pathlib import Path
 
 def read_flag(flags_dir: str, task_id: str) -> str:
+    task_id = task_id.strip().upper()
+    if task_id.startswith("T"):
+        task_id = task_id[1:]
     task_id = task_id.zfill(2)
     flag_path = Path(flags_dir) / f"{task_id}.flag"
 
@@ -129,9 +140,20 @@ app = FastAPI()
 class CheckRequest(BaseModel):
     task_id: str
 
+def normalize_task_id(raw: str) -> str:
+    task_id = raw.strip().upper()
+
+    if task_id.startswith("T"):
+        task_id = task_id[1:]
+
+    if not task_id.isdigit():
+        raise HTTPException(status_code=400, detail="Unsupported task ID")
+
+    return task_id.zfill(2)
+
 @app.post("/api/check")
 def check_task(req: CheckRequest):
-    task_id = req.task_id.strip()
+    task_id = normalize_task_id(req.task_id)
 
     if task_id not in TASKS:
         raise HTTPException(status_code=400, detail="Unsupported task ID")
@@ -288,7 +310,6 @@ from core.ssh_runner import run_remote_command
 
 RISKY_PACKAGES = [
     "telnet",
-    "talk",
     "ftp",
     "rsh-client",
 ]
@@ -317,13 +338,15 @@ cat > "$TASKS_DIR/task04.py" <<'EOF'
 from core.ssh_runner import run_remote_command
 
 SERVICES = [
+    "apache2",
+    "rpcbind",
     "vsftpd",
-    "xrdp"
 ]
 
 RISKY_PORTS = [
     21,
-    3389
+    80,
+    111,
 ]
 
 def check_service_inactive(host: str, user: str, ssh_key: str, service: str) -> tuple[bool, str]:
@@ -635,12 +658,12 @@ def run(config: dict) -> tuple[bool, str]:
     user = config["user"]
     ssh_key = config["ssh_key"]
 
-    cmd = "sudo -n stat -c '%U:%G %a' /etc/sudoers.d/devops"
+    cmd = "sudo -n stat -c '%U:%G %a' /etc/myapp/app.env"
     code, stdout, stderr = run_remote_command(host, user, ssh_key, cmd)
     if code != 0:
-        return False, stderr or "Unable to stat /etc/sudoers.d/devops"
+        return False, stderr or "Unable to stat /etc/myapp/app.env"
 
-    if stdout.strip() != "root:root 440":
+    if stdout.strip() != "root:root 640":
         return False, f"Unexpected owner/mode: {stdout.strip()}"
 
     return True, "Task 10 completed"
