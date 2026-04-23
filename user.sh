@@ -23,7 +23,7 @@ fi
 
 echo "[*] Installing required packages..."
 apt update
-apt install -y apache2 curl openssh-server rpcbind ufw xrdp vsftpd fail2ban
+apt install -y apache2 curl openssh-server rpcbind ufw xrdp vsftpd fail2ban cryptsetup
 
 echo "[*] Creating ~/.ssh directory..."
 mkdir -p "$SSH_DIR"
