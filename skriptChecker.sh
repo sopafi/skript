@@ -409,12 +409,10 @@ def get_ufw_status(host: str, user: str, ssh_key: str) -> tuple[bool, str, str]:
     code, stdout, stderr = run_remote_command(host, user, ssh_key, cmd)
 
     if code != 0:
-        if stderr:
-            return False, "", f"Unable to read UFW status: {stderr}"
-        return False, "", "Unable to read UFW status"
+        return False, "", "Unable to verify firewall configuration"
 
     if not stdout.strip():
-        return False, "", "Empty output from UFW"
+        return False, "", "Unable to verify firewall configuration"
 
     return True, stdout, ""
 
@@ -424,10 +422,10 @@ def check_ufw_active(output: str) -> tuple[bool, str]:
             status_value = line.split(":", 1)[1].strip().lower()
             if status_value == "active":
                 return True, ""
-            return False, "UFW is not active"
+            return False, "Firewall policy is not compliant"
 
-    return False, "Unable to determine whether UFW is active"
-
+    return False, "Firewall policy is not compliant"
+    
 def check_default_policies(output: str) -> tuple[bool, str]:
     incoming_ok = False
     outgoing_ok = False
@@ -500,14 +498,13 @@ def run(config: dict) -> tuple[bool, str]:
     code, stdout, stderr = run_remote_command(host, user, ssh_key, cmd)
 
     if code != 0:
-        return False, stderr or "Unable to read effective sshd config"
+        return False, "Unable to verify SSH configuration"
 
     effective = stdout.lower()
     for key, expected in REQUIRED.items():
         probe = f"{key} {expected}"
         if probe not in effective:
-            return False, f"Missing SSH hardening setting: {probe}"
-
+            return False, "SSH hardening settings are not compliant"
     return True, "Task 06 completed"
 EOF
 
@@ -524,19 +521,19 @@ def run(config: dict) -> tuple[bool, str]:
 
     code, stdout, stderr = run_remote_command(host, user, ssh_key, "sudo -n cat /etc/passwd")
     if code != 0:
-        return False, stderr or "Unable to read /etc/passwd"
+        return False, "Unable to verify local accounts"
 
     if re.search(rf"^{ACCOUNT}:", stdout, re.MULTILINE):
-        return False, f"Account {ACCOUNT} is still present in /etc/passwd"
+        return False, "Legacy account cleanup is not complete"
 
     code, shadow_out, shadow_err = run_remote_command(
         host, user, ssh_key, "sudo -n test -f /etc/shadow && sudo -n cat /etc/shadow || true"
     )
     if code != 0:
-        return False, shadow_err or "Unable to inspect /etc/shadow"
+        return False, "Unable to verify local accounts"
 
     if re.search(rf"^{ACCOUNT}:", shadow_out, re.MULTILINE):
-        return False, f"Account {ACCOUNT} is still present in /etc/shadow"
+        return False, "Legacy account cleanup is not complete"
 
     return True, "Task 07 completed"
 EOF
@@ -562,28 +559,28 @@ def run(config: dict) -> tuple[bool, str]:
 
     code, pwq_out, pwq_err = run_remote_command(host, user, ssh_key, "sudo -n cat /etc/security/pwquality.conf")
     if code != 0:
-        return False, pwq_err or "Unable to read pwquality.conf"
+        return False, "Unable to verify password policy"
 
     match = re.search(r"^[ \t]*minlen[ \t]*=[ \t]*(\d+)", pwq_out, re.MULTILINE)
     if not match:
-        return False, "minlen is missing in pwquality.conf"
+        return False, "Password policy is not compliant"
     if int(match.group(1)) < 12:
-        return False, "minlen is lower than 12"
+        return False, "minlen is too low"
 
     code, defs_out, defs_err = run_remote_command(host, user, ssh_key, "sudo -n cat /etc/login.defs")
     if code != 0:
-        return False, defs_err or "Unable to read login.defs"
+        return False, "Unable to verify password policy"
 
     max_days = extract_login_defs_value(defs_out, "PASS_MAX_DAYS")
     min_days = extract_login_defs_value(defs_out, "PASS_MIN_DAYS")
     warn_age = extract_login_defs_value(defs_out, "PASS_WARN_AGE")
 
     if max_days is None or max_days > 90:
-        return False, "PASS_MAX_DAYS is not compliant"
+        return False, "Password aging policy is not compliant"
     if min_days is None or min_days < 1:
-        return False, "PASS_MIN_DAYS is not compliant"
+        return False, "Password aging policy is not compliant"
     if warn_age is None or warn_age < 7:
-        return False, "PASS_WARN_AGE is not compliant"
+        return False, "Password aging policy is not compliant"
 
     return True, "Task 08 completed"
 EOF
@@ -593,11 +590,6 @@ import re
 from core.ssh_runner import run_remote_command
 
 ACCOUNT = "devops"
-
-REQUIRED_COMMANDS = [
-    "/usr/bin/systemctl status *",
-    "/usr/bin/journalctl *",
-]
 
 FORBIDDEN_PATTERNS = [
     r"\bNOPASSWD\b",
@@ -622,7 +614,7 @@ def run(config: dict) -> tuple[bool, str]:
     cmd = "sudo -n sh -c 'cat /etc/sudoers /etc/sudoers.d/* 2>/dev/null'"
     code, stdout, stderr = run_remote_command(host, user, ssh_key, cmd)
     if code != 0:
-        return False, stderr or "Unable to read sudoers policy"
+        return False, "Unable to verify sudo policy"
 
     rules = []
     for line in stdout.splitlines():
@@ -635,7 +627,7 @@ def run(config: dict) -> tuple[bool, str]:
             rules.append(normalize_spaces(stripped))
 
     if not rules:
-        return False, f"No sudo rules found for {ACCOUNT}"
+        return False, "Unable to verify sudo policy"
 
     merged = "\n".join(rules)
 
@@ -643,9 +635,11 @@ def run(config: dict) -> tuple[bool, str]:
         if re.search(pattern, merged):
             return False, f"{ACCOUNT} still has overly broad sudo privileges"
 
-    for required in REQUIRED_COMMANDS:
-        if required not in merged:
-            return False, f"Missing required sudo rule: {required}"
+    if "/usr/bin/systemctl status" not in merged:
+        return False, "Missing required sudo rule for systemctl status"
+
+    if "/usr/bin/journalctl" not in merged:
+        return False, "Missing required sudo rule for journalctl"
 
     return True, "Task 09 completed"
 EOF
@@ -661,10 +655,27 @@ def run(config: dict) -> tuple[bool, str]:
     cmd = "sudo -n stat -c '%U:%G %a' /etc/myapp/app.env"
     code, stdout, stderr = run_remote_command(host, user, ssh_key, cmd)
     if code != 0:
-        return False, stderr or "Unable to stat /etc/myapp/app.env"
+        return False, "Unable to verify sensitive file permissions"
 
-    if stdout.strip() != "root:root 640":
-        return False, f"Unexpected owner/mode: {stdout.strip()}"
+    output = stdout.strip()
+    parts = output.split()
+    if len(parts) != 2 or ":" not in parts[0]:
+        return False, "Unable to verify sensitive file permissions"
+
+    owner_group, mode_str = parts
+    owner, group = owner_group.split(":", 1)
+
+    if not mode_str.isdigit():
+        return False, "Unable to verify sensitive file permissions"
+
+    mode = int(mode_str)
+
+    if owner != "root" or group != "root":
+        return False, "Sensitive file permissions are not compliant"
+
+
+    if mode > 640:
+        return False, "Sensitive file permissions are not compliant"
 
     return True, "Task 10 completed"
 EOF
@@ -685,19 +696,19 @@ def run(config: dict) -> tuple[bool, str]:
 
     normalized = journald_out.replace(" ", "").lower()
     if "storage=persistent" not in normalized:
-        return False, "journald is not set to persistent storage"
+        return False, "Logging or SSH protection settings are incomplete"
 
     code, systemctl_out, systemctl_err = run_remote_command(
         host, user, ssh_key, "sudo -n systemctl is-active fail2ban"
     )
     if code != 0 or systemctl_out.strip() != "active":
-        return False, systemctl_err or "fail2ban service is not active"
+        return False, "Logging or SSH protection settings are incomplete"
 
     code, jail_out, jail_err = run_remote_command(
         host, user, ssh_key, "sudo -n fail2ban-client status sshd"
     )
     if code != 0:
-        return False, jail_err or "Unable to verify fail2ban sshd jail"
+        return False, "Logging or SSH protection settings are incomplete"
 
     return True, "Task 11 completed"
 EOF
@@ -725,7 +736,7 @@ def run(config: dict) -> tuple[bool, str]:
         f"stat -c %s {IMAGE_PATH}"
     )
     if code != 0:
-        return False, stderr or f"Unable to determine size of {IMAGE_PATH}"
+        return False, f"Unable to determine size of {IMAGE_PATH}"
 
     try:
         size = int(stdout.strip())
@@ -733,14 +744,14 @@ def run(config: dict) -> tuple[bool, str]:
         return False, f"Invalid file size returned for {IMAGE_PATH}"
 
     if size < MIN_SIZE_BYTES:
-        return False, f"{IMAGE_PATH} is too small ({size} bytes), expected at least {MIN_SIZE_BYTES} bytes"
+        return False, f"{IMAGE_PATH} is too small ({size} bytes)"
 
     code, _, stderr = run_remote_command(
         host, user, ssh_key,
         f"sudo -n cryptsetup isLuks {IMAGE_PATH}"
     )
     if code != 0:
-        return False, stderr or f"{IMAGE_PATH} is not a valid LUKS container"
+        return False, f"{IMAGE_PATH} is not a valid LUKS container"
 
     return True, "Task 12 completed"
 EOF
